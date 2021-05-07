@@ -1,36 +1,31 @@
 var express = require('express');
 var router = express.Router();
-const sqlite3 = require('sqlite3');
-const db = new sqlite3.Database('./chinook.db');
+var redis = require('redis');
 const RandExp=require('randexp')
+var client = redis.createClient();
 /* GET users listing. */
-db.run("CREATE TABLE urlshortener([shortid] INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,[shortcode] NVARCHAR(120) unique,[redirectCount] integer,[startDate] datetime,[lastSeenDate] datetime,url text,shorturl text)", 
-function(error){
-  // db.run('delete from urlshortener')
-  // console.log('table created')
-});
 router.get('/:shortcode', function(req, res, next) {
   try {
-    db.get('Select shortid,redirectCount,url from urlshortener where shortcode=$shortcode',{
-      $shortcode:req.params.shortcode
-    },(error,rows)=>{
-      if(rows==undefined||rows==null||rows.length<=0){
+    client.hgetall(`urlshortened:${req.params.shortcode}`, function(err, object) {
+      if(object==null){
         return res.status(404).json({"ERROR":"Not FOUND"});
       }
+      if(object.shortcode==req.params.shortcode){
+        client.hmset('urlshortened:'+req.params.shortcode, { 
+ 
+          lastSeenDate:new Date().toISOString()
+        })
+        client.hincrby('urlshortened:'+req.params.shortcode,'redirectCount',1)
+      
+        var msg='HTTP/1.1 302 FOUND'
+        let Location=object.url
+        return res.status(302).json({msg,Location});
+      }
       else{
-        db.run('update urlshortener set lastSeenDate=$lastSeenDate,redirectCount=$redirectCount where shortcode=$shortcode',{
-          $lastSeenDate:new Date().toISOString(),
-          $redirectCount:rows.redirectCount+1,
-          $shortcode:req.params.shortcode
-        },(error,rows1)=>{
-          var msg='HTTP/1.1 302 FOUND'
-          let Location=rows.url
-          return res.status(302).json({msg,Location});
-      })
-     
-    }
+        return res.status(404).json({"ERROR":"Not FOUND"});
+      }
     })
-  
+   
   } catch (error) {
     res.status(403).json(error);
     next(error)
@@ -39,17 +34,18 @@ router.get('/:shortcode', function(req, res, next) {
 });
 router.get('/:shortcode/stats', function(req, res, next) {
   try {
-    db.get('Select startDate,lastSeenDate,redirectCount from urlshortener where shortcode=$shortcode',{
-      $shortcode:req.params.shortcode
-    },(error,rows)=>{
-      if(rows==undefined||rows==null||rows.length<=0){
+    client.hgetall(`urlshortened:${req.params.shortcode}`, function(err, object) {
+      if(object==null){
         return res.status(404).json({"ERROR":"Not FOUND"});
       }
+      if(object.shortcode==req.params.shortcode){
+        let result={startDate:object.startDate,lastSeenDate:object.lastSeenDate,redirectCount:object.redirectCount}
+        return res.status(200).json(result);
+      }
       else{
-        return res.status(200).json(rows);
+        return res.status(404).json({"ERROR":"Not FOUND"});
       }
     })
-
   } catch (error) {
     res.status(403).json(error);
     next(error)
@@ -72,28 +68,29 @@ router.post('/shorten', function(req, res, next) {
     else{
       shorturl=new RandExp(/^[0-9a-zA-Z_]{4,}$/).gen()
     }
-    db.get('Select * from urlshortener where shortcode=$shortcode',{
-      $shortcode:req.body.shortcode
-    },(error,rows)=>{
-      
-        if(rows==undefined||rows==null||rows.length>0){
-          db.run(`insert into urlshortener(url,startDate,shortcode,shorturl,redirectCount) Values(?,?,?,?,?)`,
-          [req.body.url,new Date().toISOString(),req.body.shortcode || shorturl,shorturl,0],
-          (error)=>{
-            if (error) {
-              return res.status(500).json({'ERROR':error.message});
-            }
-            
-            return res.status(201).json({'shortcode':req.body.shortcode || shorturl});
-        }
-          )
-        }
-        else{
-          return res.status(409).json({"ERROR":'Urlshortcode already exists'});
-        }
-      
-    }
-    )
+    client.hgetall(`urlshortened:${req.body.shortcode||shorturl}`, function(err, object) {
+
+      result=object;
+      if(object ==null||result.shortcode!=req.body.shortcode){
+        client.hmset(`urlshortened:${req.body.shortcode||shorturl}`, { 
+          url:req.body.url,
+          startDate:new Date().toISOString(),
+          shortcode:req.body.shortcode || shorturl,
+          shorturl:shorturl,
+          redirectCount:0
+        },function(err,result){
+         client.hgetall(`urlshortened:${req.body.shortcode||shorturl}`, function(err, object) {
+           
+            result=object;
+            return res.status(201).json({"shortcode":result.shortcode});
+            });
+        })
+      }
+      else{
+        return res.status(409).json({"ERROR":'Urlshortcode already exists'});
+      }
+      });
+     
   } catch (error) {
 
     res.status(403).json(error);
